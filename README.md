@@ -1,5 +1,7 @@
 # PG-M2TN
 
+![PG-M2TN framework](assets/figure1.png)
+
 Official implementation of **Physics-Guided Masked Multi-Task Network for Edge-Friendly Battery Health Diagnostics from Stochastically Fragmented Charging Profiles**.
 
 PG-M2TN estimates battery state of health (SOH) from incomplete charging profiles. The method combines masked profile reconstruction, SOH regression, and voltage-dispersion-rate (VDR) prediction in one compact network. This repository contains the PG-M2TN model, its training and evaluation pipeline, and the exact ablation configurations used to study its components.
