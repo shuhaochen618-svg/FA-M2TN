@@ -1,100 +1,108 @@
-# PG-M2TN
+<div align="center">
 
-![PG-M2TN framework](https://raw.githubusercontent.com/shuhaochen618-svg/PG-M2TN/main/assets/figure1.png)
+<h1>PG-M2TN</h1>
 
-Official implementation of **Physics-Guided Masked Multi-Task Network for Edge-Friendly Battery Health Diagnostics from Stochastically Fragmented Charging Profiles**.
+<h3>Physics-Guided Masked Multi-Task Network for Edge-Friendly Battery Health Diagnostics from Stochastically Fragmented Charging Profiles</h3>
 
-PG-M2TN estimates battery state of health (SOH) from incomplete charging profiles. The method combines masked profile reconstruction, SOH regression, and voltage-dispersion-rate (VDR) prediction in one compact network. This repository contains the PG-M2TN model, its training and evaluation pipeline, and the exact ablation configurations used to study its components.
+<p><strong>Compact SOH estimation, VDR prediction, and masked-profile reconstruction from incomplete charging records</strong></p>
 
-## What We Study
+<p><code>Python 3.11</code> &nbsp;&middot;&nbsp; <code>PyTorch 2.5</code> &nbsp;&middot;&nbsp; <code>Charge-only profiles</code> &nbsp;&middot;&nbsp; <code>630,149 parameters</code></p>
 
-Battery-health models are commonly evaluated using complete and regularly sampled cycling records. Real charging observations may instead be interrupted by charger disconnection, communication loss, or partial data collection. Missing continuous regions can remove diagnostically useful voltage and current evolution and make SOH estimation less reliable.
+<p><a href="#overview">Overview</a> &nbsp;&middot;&nbsp; <a href="#core-contributions">Contributions</a> &nbsp;&middot;&nbsp; <a href="#results">Results</a> &nbsp;&middot;&nbsp; <a href="#data">Data</a> &nbsp;&middot;&nbsp; <a href="#reproduction">Reproduction</a></p>
 
-We study whether a compact model can learn useful battery-health representations directly from stochastically fragmented charging profiles. PG-M2TN addresses this problem through three related objectives:
+</div>
 
-1. **SOH estimation** learns the primary battery-health target.
-2. **Masked reconstruction** encourages the shared encoder to recover information removed from continuous profile regions.
-3. **VDR prediction** supplies an auxiliary charge-curve descriptor associated with voltage dispersion during charging.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/shuhaochen618-svg/PG-M2TN/main/assets/figure1.png" width="100%" alt="PG-M2TN framework overview">
+</p>
 
-VDR is derived from the charging profile and used as a fixed-weight auxiliary target rather than an inference input. It introduces charge-curve information into representation learning while keeping the model independent of battery-specific electrochemical equation parameters.
+## Overview
 
-## Main Findings
+PG-M2TN estimates battery state of health (SOH) from stochastically fragmented charging profiles. It combines SOH regression, voltage-dispersion-rate (VDR) prediction, and masked-profile reconstruction in a compact multi-task network designed for incomplete field observations and resource-constrained deployment.
 
-- Fragmented voltage-current sequences can be processed directly without requiring a complete charging curve at inference time.
-- Joint reconstruction and health-related supervision provide a practical way to learn from continuous missing regions.
-- A two-layer PG-M2TN with hidden size `128` contains `630,149` parameters, supporting the study's efficiency-oriented design objective.
-- The influence of MAE and VDR supervision is dataset-dependent. The ablations are therefore reported separately rather than used to claim that either auxiliary task universally improves pooled SOH error.
-- Fixed task coefficients make the contribution of each learning objective explicit and reproducible.
+Real charging records may be interrupted by charger disconnection, communication loss, or partial data collection. PG-M2TN learns from continuous missing regions instead of assuming that a complete charging curve is always available.
+
+| Item | Setting |
+|---|---|
+| Input | Fragmented charging voltage and current |
+| Sequence length | 512 points |
+| Primary task | SOH estimation |
+| Auxiliary tasks | VDR prediction and masked reconstruction |
+| Datasets | CALCE, HUST, HNEI, CALB, ISU-ILCC |
+| Main configuration | PG-M2TN-128 |
+| Parameters | 630,149 |
+| Data split | Dataset-stratified, cell-level 70/15/15 |
+
+## Core Contributions
+
+1. **Fragment-aware health diagnostics.** Continuous random block masking represents incomplete charging observations and trains the encoder to recover information from missing profile regions.
+2. **Physics-related auxiliary supervision.** VDR is derived from the charging profile and introduced as a fixed-weight auxiliary target, adding charge-curve information without requiring electrochemical equation parameters at inference time.
+3. **Compact multi-task learning.** One shared encoder supports SOH estimation, VDR prediction, and profile reconstruction with 630,149 parameters.
+4. **Transparent training protocol.** Fixed task coefficients, cell-level data separation, deterministic validation and test masking, and validation-only model selection make the experiment directly reproducible.
+
+The fixed training objective is:
+
+```text
+L = 0.50 * L_SOH + 0.50 * L_VDR + 0.10 * L_MAE
+```
 
 ## Results
 
-PG-M2TN was evaluated on a held-out, cell-level test partition covering CALCE, HUST, HNEI, CALB, and ISU-ILCC. Model selection used validation SOH RMSE only; the test partition was not used to choose the checkpoint.
+PG-M2TN was evaluated on a held-out cell-level test partition. The checkpoint was selected using validation SOH RMSE only; the test partition was not used for model selection.
 
-| Configuration | Parameters | Best epoch | Validation SOH RMSE | Test SOH RMSE | Test SOH MAE | Test SOH R2 |
+| Configuration | Parameters | Best epoch | Validation RMSE | Test RMSE | Test MAE | Test R2 |
 |---|---:|---:|---:|---:|---:|---:|
-| PG-M2TN-128 | 630,149 | 98 | 0.040604 | 0.089500 | 0.046316 | 0.943954 |
+| **PG-M2TN-128** | **630,149** | **98** | **0.040604** | **0.089500** | **0.046316** | **0.943954** |
 
-The exact PG component ablations produced:
+### Component Ablations
 
-| Configuration | SOH weight | VDR weight | MAE weight | Best epoch | Test SOH RMSE | Test SOH MAE | Test SOH R2 |
+| Configuration | SOH weight | VDR weight | MAE weight | Best epoch | Test RMSE | Test MAE | Test R2 |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | `full` | 0.50 | 0.50 | 0.10 | 98 | 0.089500 | 0.046316 | 0.943954 |
 | `no_mae` | 0.50 | 0.50 | 0.00 | 83 | 0.110127 | 0.053817 | 0.915143 |
 | `no_vdr` | 0.50 | 0.00 | 0.10 | 61 | 0.089429 | 0.049512 | 0.944043 |
 | `soh_only` | 0.50 | 0.00 | 0.00 | 74 | 0.072608 | 0.042413 | 0.963113 |
 
-These configurations isolate the contribution of each PG-M2TN objective. The full model jointly supports SOH estimation, VDR prediction, and masked-profile reconstruction, while the ablations expose the resulting accuracy and representation trade-offs. Small numerical variation can occur across CUDA and cuDNN versions.
+The ablations isolate the role of each PG-M2TN objective. Their effects are dataset-dependent and reveal the trade-off between pooled SOH accuracy and joint SOH-VDR-reconstruction capability.
 
 ## Why It Matters
 
-The work targets a practical gap between complete-profile laboratory evaluation and incomplete charging observations. PG-M2TN shows how a charge-curve descriptor and masked reconstruction can be incorporated into a compact, reproducible multi-task architecture.
+- **Incomplete observations:** battery health can be estimated when continuous charging regions are unavailable.
+- **Efficient inference:** the compact fixed architecture provides a practical basis for edge-deployment studies.
+- **Interpretable supervision:** VDR connects representation learning with a charge-profile descriptor while remaining separate from inference inputs.
+- **Reproducible evaluation:** cycles from the same cell never cross training, validation, and test partitions.
 
-This design supports three practical goals:
-
-- diagnosing battery health when continuous parts of a charging record are unavailable;
-- retaining a small fixed architecture suitable for subsequent embedded deployment studies;
-- separating model training from post-hoc physical interpretation so that each claim can be evaluated independently.
-
-## Repository Layout
+## Repository Structure
 
 ```text
 PG-M2TN/
 |-- pg_m2tn/
 |   |-- data/
-|   |   |-- dataset_loader.py   # charge extraction, normalization, cell split
+|   |   |-- dataset_loader.py   # charge extraction and cell-level split
 |   |   `-- masking_engine.py   # random and fixed-seed block masking
 |   |-- models/
-|   |   |-- pg_m2tn.py          # PG-M2TN-128 architecture
+|   |   |-- pg_m2tn.py          # PG-M2TN-128 implementation
 |   |   `-- loss.py             # fixed SOH/VDR/MAE objective
-|   |-- evaluation.py           # pooled and dataset-wise metrics
+|   |-- evaluation.py           # pooled and per-dataset evaluation
 |   |-- protocol.py             # experiment constants and ablations
 |   `-- utils/metrics.py
 |-- scripts/
 |   |-- train.py                # main and ablation training
-|   |-- evaluate.py             # held-out fixed-test evaluation
-|   `-- run_ablation.sh         # sequential four-variant launcher
+|   |-- evaluate.py             # held-out test evaluation
+|   `-- run_ablation.sh         # four-configuration launcher
 |-- tests/test_smoke.py
-|-- CHANGELOG.md
 |-- requirements.txt
 `-- setup.py
 ```
 
-Baseline implementations, manuscript plotting utilities, server orchestration scripts, datasets, and trained checkpoints are not included.
+> This repository contains only PG-M2TN training, evaluation, and component-ablation code. Datasets, trained checkpoints, manuscript plotting utilities, and comparison-model implementations are not included.
 
-## Environment
-
-The reported experiments used:
-
-```text
-Python 3.11.10
-PyTorch 2.5.1 + CUDA 12.1
-NumPy 2.4.6
-tqdm 4.68.4
-```
-
-Create the environment and verify the package:
+## Installation
 
 ```bash
+git clone https://github.com/shuhaochen618-svg/PG-M2TN.git
+cd PG-M2TN
+
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -102,11 +110,11 @@ pip install -e .
 python -m unittest discover -s tests -v
 ```
 
-Install the CUDA 12.1 build of PyTorch when reproducing the reported GPU environment.
+The reported environment used PyTorch 2.5.1 with CUDA 12.1, NumPy 2.4.6, and tqdm 4.68.4.
 
 ## Data
 
-Prepare the five unified datasets under one root:
+Place the five unified datasets under one root:
 
 ```text
 battery_data/
@@ -117,13 +125,12 @@ battery_data/
 `-- ISU_ILCC/*.pkl
 ```
 
-Each file stores one cell:
+Each pickle file represents one cell and follows this structure:
 
 ```python
 {
     "cell_id": "CS2_35",
     "nominal_capacity_in_Ah": 1.1,
-    "cathode_material": "LCO",  # optional
     "cycle_data": [
         {
             "voltage_in_V": numpy_array,
@@ -135,7 +142,7 @@ Each file stores one cell:
 }
 ```
 
-The evaluated data snapshot contains `753,646` usable charge-only cycle samples from `274` cells:
+The evaluated snapshot contains 753,646 charge-only cycle samples from 274 cells:
 
 | Partition | Cells | Cycle samples |
 |---|---:|---:|
@@ -143,24 +150,11 @@ The evaluated data snapshot contains `753,646` usable charge-only cycle samples 
 | Validation | 39 | 84,413 |
 | Test | 46 | 126,402 |
 
-Cells are split within each source dataset using a `70/15/15` target ratio and seed `42`. Cycles from the same cell never cross partitions. Per-dataset train/validation/test cell counts are CALCE `9/1/3`, HUST `53/11/13`, HNEI `9/2/3`, CALB `18/4/5`, and ISU-ILCC `100/21/22`.
+The split uses seed `42`. Per-dataset train/validation/test cell counts are CALCE `9/1/3`, HUST `53/11/13`, HNEI `9/2/3`, CALB `18/4/5`, and ISU-ILCC `100/21/22`.
 
 ## Reproduction
 
-### 1. Install
-
-```bash
-git clone https://github.com/shuhaochen618-svg/PG-M2TN.git
-cd PG-M2TN
-pip install -r requirements.txt
-pip install -e .
-```
-
-### 2. Prepare the data
-
-Place CALCE, HUST, HNEI, CALB, and ISU-ILCC under one data root using the directory structure shown above.
-
-### 3. Train PG-M2TN-128
+### Train PG-M2TN-128
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -170,9 +164,9 @@ python scripts/train.py \
     --output_dir outputs/pg_m2tn
 ```
 
-The script uses the reported model settings, cell split, masking seeds, and fixed loss weights by default. The best checkpoint is selected using validation SOH RMSE.
+The script uses the reported split, masking seeds, optimizer settings, fixed loss coefficients, and validation-based checkpoint selection by default.
 
-### 4. Run the ablations
+### Run the Ablations
 
 ```bash
 bash scripts/run_ablation.sh /path/to/battery_data outputs/pg_m2tn
@@ -180,7 +174,7 @@ bash scripts/run_ablation.sh /path/to/battery_data outputs/pg_m2tn
 
 This runs `full`, `no_mae`, `no_vdr`, and `soh_only` sequentially.
 
-### 5. Evaluate
+### Evaluate the Selected Checkpoint
 
 ```bash
 python scripts/evaluate.py \
@@ -189,4 +183,4 @@ python scripts/evaluate.py \
     --output outputs/pg_m2tn/full/evaluation.json
 ```
 
-Training results, per-dataset metrics, and split information are saved under `outputs/pg_m2tn/<variant>/`.
+Results, per-dataset metrics, checkpoints, and split metadata are written to `outputs/pg_m2tn/<variant>/`.
