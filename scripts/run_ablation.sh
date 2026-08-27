@@ -1,39 +1,17 @@
-#!/bin/bash
-# PG-M2TN Ablation Study Runner
-# ================================
-# Runs the full 2x2 factorial ablation study:
-#   1. Full PG-M2TN (SOH + VDR + MAE + Dynamic Gating)
-#   2. No-MAE       (SOH + VDR, no reconstruction)
-#   3. No-VDR       (SOH + MAE, no auxiliary VDR task)
-#   4. Single-Task  (SOH only, no MAE, no VDR)
-#
-# Usage:
-#   bash scripts/run_ablation.sh
-#   bash scripts/run_ablation.sh --data_root /path/to/dataset
+#!/usr/bin/env bash
+set -euo pipefail
 
-DATA_ROOT=${1:-"./dataset"}
-EPOCHS=150
-BATCH=256
-SAVE="./checkpoints"
+if [[ $# -lt 1 ]]; then
+    echo "Usage: bash scripts/run_ablation.sh /path/to/battery_data [output_dir]"
+    exit 2
+fi
 
-echo "============================================="
-echo "  PG-M2TN Ablation Study"
-echo "  Data: $DATA_ROOT | Epochs: $EPOCHS"
-echo "============================================="
+DATA_ROOT="$1"
+OUTPUT_DIR="${2:-outputs/august_2026}"
 
-for ABL in none no_mae no_vdr single_task; do
-    echo ""
-    echo ">>> Running ablation: $ABL"
+for variant in full no_mae no_vdr soh_only; do
     python scripts/train.py \
         --data_root "$DATA_ROOT" \
-        --epochs $EPOCHS \
-        --batch_size $BATCH \
-        --ablation $ABL \
-        --save_dir $SAVE
+        --variant "$variant" \
+        --output_dir "$OUTPUT_DIR"
 done
-
-echo ""
-echo "============================================="
-echo "  All ablation runs complete!"
-echo "  Results saved in $SAVE/"
-echo "============================================="

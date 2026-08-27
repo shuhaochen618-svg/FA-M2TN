@@ -1,87 +1,118 @@
-"""
-PG-M2TN Evaluation Script
-===========================
-Evaluate a trained PG-M2TN checkpoint on test data.
+"""Evaluate a PG-M2TN checkpoint on the fixed August 2026 test split."""
 
-Usage:
-  python scripts/evaluate.py --checkpoint ./checkpoints/pgm2tn_none_best.pt
-"""
-import os, sys, argparse, json
-import numpy as np
+import argparse
+import json
+import os
+import sys
+
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
-from torch.cuda.amp import autocast
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from pg_m2tn.models.pg_m2tn import PGM2TN, count_parameters
-from pg_m2tn.models.loss import PhysicsGatedLoss
-from pg_m2tn.models.physics_extractor import PhysicsExtractor
+REPOSITORY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPOSITORY_ROOT)
+
 from pg_m2tn.data.dataset_loader import BatteryCycleDataset, split_by_cell
 from pg_m2tn.data.masking_engine import MaskedBatteryDataset
-from pg_m2tn.utils.metrics import compute_task_metrics, compute_per_dataset_metrics
+from pg_m2tn.evaluation import evaluate_tasks
+from pg_m2tn.models.pg_m2tn import PGM2TN
+from pg_m2tn.protocol import DATASETS, PROTOCOL
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Evaluate PG-M2TN")
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--data_root", default="./dataset")
+    parser.add_argument("--datasets", nargs="+", default=DATASETS)
+    parser.add_argument("--output", default="./outputs/evaluation.json")
+    parser.add_argument("--batch_size", type=int, default=2048)
+    parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--split_seed", type=int, default=PROTOCOL["split_seed"])
+    parser.add_argument(
+        "--mask_seed", type=int, default=PROTOCOL["test_mask_seed"]
+    )
+    return parser.parse_args()
+
 
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument('--checkpoint', type=str, required=True)
-    p.add_argument('--data_root', type=str, default='./dataset')
-    p.add_argument('--datasets', nargs='+', default=['CALCE','HUST','HNEI','CALB','ISU_ILCC'])
-    p.add_argument('--mask_ratio', type=float, default=0.5)
-    p.add_argument('--batch_size', type=int, default=256)
-    args = p.parse_args()
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    ckpt = torch.load(args.checkpoint, map_location=device)
-    ckpt_args = ckpt.get('args', {})
-
-    # Reconstruct model
-    abl = ckpt_args.get('ablation', 'none')
-    use_mae = abl not in ('no_mae','single_task')
-    model = PGM2TN(2, ckpt_args.get('hidden_dim',128), ckpt_args.get('num_layers',2),
-                   enable_mae=use_mae).to(device)
-    model.load_state_dict(ckpt['model_state_dict'])
+    args = parse_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    configuration = checkpoint["hp"]
+    variant = configuration.get("variant", "full")
+    model = PGM2TN(
+        input_dim=2,
+        hidden_dim=int(configuration["hidden_dim"]),
+        num_layers=int(configuration["num_layers"]),
+        dropout=float(configuration.get("dropout", 0.2)),
+        enable_mae=bool(configuration.get("enable_mae", True)),
+    ).to(device)
+    state = {
+        name.replace("module.", ""): value
+        for name, value in checkpoint["model_state_dict"].items()
+    }
+    model.load_state_dict(state, strict=True)
     model.eval()
-    print(f"Loaded checkpoint: {args.checkpoint} (epoch {ckpt.get('epoch','?')})")
-    print(f"Parameters: {count_parameters(model):,}")
+    if torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
 
-    # Data
-    ds = BatteryCycleDataset(args.data_root, args.datasets, min_cycles=50)
-    _, _, te_i = split_by_cell(ds, seed=ckpt_args.get('seed',42))
-    te_ds = MaskedBatteryDataset(Subset(ds, te_i), fixed_mask_ratio=args.mask_ratio, seed=42)
-    te_dl = DataLoader(te_ds, batch_size=args.batch_size, shuffle=False)
+    dataset = BatteryCycleDataset(
+        data_root=args.data_root,
+        datasets=args.datasets,
+        seq_len=PROTOCOL["sequence_length"],
+        min_cycles=PROTOCOL["minimum_cycles"],
+    )
+    _, _, test_indices, split_cells = split_by_cell(
+        dataset, seed=args.split_seed, return_cell_ids=True
+    )
+    test_dataset = MaskedBatteryDataset(
+        Subset(dataset, test_indices),
+        fixed_mask_ratio=PROTOCOL["evaluation_mask_ratio"],
+        seed=args.mask_seed,
+    )
+    loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
+    )
+    pooled, per_dataset = evaluate_tasks(
+        model,
+        loader,
+        device,
+        enable_mae=bool(configuration.get("enable_mae", True)),
+    )
+    if float(configuration.get("vdr_weight", 0.0)) == 0.0:
+        pooled["diagnostic_unsupervised_vdr"] = pooled.pop("vdr")
+        for values in per_dataset.values():
+            values["diagnostic_unsupervised_vdr"] = values.pop("vdr")
 
-    phys = PhysicsExtractor()
-    sp_all, st_all, vp_all, vt_all, cids = [],[],[],[],[]
+    output = {
+        "checkpoint": os.path.abspath(args.checkpoint),
+        "variant": variant,
+        "configuration": configuration,
+        "protocol": {
+            "profile_mode": PROTOCOL["profile_mode"],
+            "split_strategy": "dataset-stratified cell-level 70/15/15",
+            "split_seed": args.split_seed,
+            "test_mask_seed": args.mask_seed,
+            "test_mask_ratio": PROTOCOL["evaluation_mask_ratio"],
+            "test_cells": split_cells["test"],
+            "test_samples": len(test_indices),
+        },
+        "test_metrics": pooled,
+        "test_per_dataset": per_dataset,
+    }
+    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+    with open(args.output, "w", encoding="utf-8") as handle:
+        json.dump(output, handle, indent=2)
+    print(
+        f"SOH RMSE={pooled['soh']['rmse']:.6f}, "
+        f"MAE={pooled['soh']['mae']:.6f}, R2={pooled['soh']['r2']:.6f}"
+    )
+    print(f"Saved: {args.output}")
 
-    with torch.no_grad():
-        for batch in te_dl:
-            xm = batch['x_masked'].to(device)
-            with autocast():
-                _, sp, vp = model(xm)
-            sp_all.append(sp.squeeze().cpu().numpy())
-            st_all.append(batch['soh'].numpy())
-            vp_all.append(vp.squeeze().cpu().numpy())
-            vt_all.append(batch['vdr'].numpy())
-            cids.extend(list(batch['cell_id']))
 
-    sp_a, st_a = np.concatenate(sp_all), np.concatenate(st_all)
-    vp_a, vt_a = np.concatenate(vp_all), np.concatenate(vt_all)
-    sm = compute_task_metrics(sp_a-st_a, st_a)
-    vm = compute_task_metrics(vp_a-vt_a, vt_a)
-
-    print(f"\n{'='*60}")
-    print(f"  SOH — RMSE: {sm['rmse']:.4f} | MAE: {sm['mae']:.4f} | "
-          f"MAPE: {sm['mape']:.2f}% | R²: {sm['r2']:.4f}")
-    print(f"  VDR — RMSE: {vm['rmse']:.4f} | MAE: {vm['mae']:.4f} | R²: {vm['r2']:.4f}")
-
-    pd = compute_per_dataset_metrics({
-        'cell_ids':cids, 'soh_pred':sp_a.tolist(), 'soh_true':st_a.tolist(),
-        'vdr_pred':vp_a.tolist(), 'vdr_true':vt_a.tolist()})
-    print(f"\n  Per-Dataset Breakdown:")
-    for d,m in pd.items():
-        if d.startswith('_'): continue
-        print(f"    {d:<12} N={m['n_samples']:>5} SOH_RMSE={m['soh']['rmse']:.4f} "
-              f"VDR_RMSE={m['vdr']['rmse']:.4f}")
-    print(f"{'='*60}")
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

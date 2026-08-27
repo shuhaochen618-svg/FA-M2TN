@@ -1,25 +1,25 @@
-from setuptools import setup, find_packages
+from pathlib import Path
+
+from setuptools import find_packages, setup
+
+
+ROOT = Path(__file__).parent
 
 setup(
     name="pg-m2tn",
-    version="1.0.0",
-    description="Physics-Guided Masked Multi-Task Network for Edge Battery Diagnostics",
-    long_description=open("README.md", encoding="utf-8").read(),
+    version="2.0.0",
+    description="PG-M2TN August 2026 revision reproduction code",
+    long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
     author="Shuhao Chen",
     author_email="2023333541008@mails.zstu.edu.cn",
     url="https://github.com/shuhaochen618-svg/PG-M2TN",
     packages=find_packages(),
-    python_requires=">=3.8",
+    python_requires=">=3.11,<3.12",
     install_requires=[
-        "torch>=2.0.0",
-        "numpy>=1.24.0",
-        "scipy>=1.10.0",
-        "matplotlib>=3.7.0",
-        "scikit-learn>=1.2.0",
-        "tqdm>=4.65.0",
-        "pandas>=1.5.0",
-        "pyyaml>=6.0",
+        "torch>=2.5,<2.6",
+        "numpy>=2.4,<2.5",
+        "tqdm>=4.68,<4.69",
     ],
     classifiers=[
         "Programming Language :: Python :: 3",

@@ -1,174 +1,399 @@
-"""
-PG-M2TN Single-GPU Training Script
-=====================================
-Usage:
-  python scripts/train.py --data_root ./dataset --epochs 100
-  python scripts/train.py --ablation no_mae
-"""
-import os, sys, time, datetime, argparse, json
+"""Train PG-M2TN or one exact August 2026 ablation variant."""
+
+import argparse
+import json
+import math
+import os
+import random
+import sys
+import time
+from collections import defaultdict
+
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
-from torch.cuda.amp import autocast, GradScaler
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from pg_m2tn.models.pg_m2tn import PGM2TN, count_parameters
-from pg_m2tn.models.loss import PhysicsGatedLoss
-from pg_m2tn.models.physics_extractor import PhysicsExtractor
+REPOSITORY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPOSITORY_ROOT)
+
 from pg_m2tn.data.dataset_loader import BatteryCycleDataset, split_by_cell
 from pg_m2tn.data.masking_engine import MaskedBatteryDataset
-from pg_m2tn.utils.metrics import compute_task_metrics
-from pg_m2tn.utils.scheduler import WarmupCosineScheduler
+from pg_m2tn.evaluation import evaluate_soh, evaluate_tasks
+from pg_m2tn.models.loss import FixedWeightedLoss
+from pg_m2tn.models.pg_m2tn import PGM2TN, count_parameters
+from pg_m2tn.protocol import DATASETS, PROTOCOL, VARIANTS, variant_config
 
-def get_args():
-    p = argparse.ArgumentParser(description='PG-M2TN Training')
-    p.add_argument('--data_root', type=str, default='./dataset')
-    p.add_argument('--datasets', nargs='+', default=['CALCE','HUST','HNEI','CALB','ISU_ILCC'])
-    p.add_argument('--seq_len', type=int, default=512)
-    p.add_argument('--min_cycles', type=int, default=50)
-    p.add_argument('--hidden_dim', type=int, default=128)
-    p.add_argument('--num_layers', type=int, default=2)
-    p.add_argument('--dropout', type=float, default=0.2)
-    p.add_argument('--epochs', type=int, default=150)
-    p.add_argument('--batch_size', type=int, default=256)
-    p.add_argument('--lr', type=float, default=5e-4)
-    p.add_argument('--weight_decay', type=float, default=5e-4)
-    p.add_argument('--lambda_mae', type=float, default=0.1)
-    p.add_argument('--patience', type=int, default=25)
-    p.add_argument('--warmup_epochs', type=int, default=10)
-    p.add_argument('--ablation', type=str, default='none',
-                   choices=['none','no_mae','no_gating','no_vdr','single_task'])
-    p.add_argument('--save_dir', type=str, default='./checkpoints')
-    p.add_argument('--seed', type=int, default=42)
-    p.add_argument('--num_workers', type=int, default=4)
-    return p.parse_args()
 
-def train_one_epoch(model, loader, criterion, optimizer, scaler, phys, device, use_mae, use_gating, use_vdr):
-    model.train()
-    total, accum, nb = 0., {'mae':0,'soh':0,'vdr':0}, 0
-    for batch in loader:
-        xm = batch['x_masked'].to(device); xf = batch['x_full'].to(device)
-        soh = batch['soh'].to(device); vdr = batch['vdr'].to(device)
-        alpha = phys.batch_extract(batch['V_raw'], batch['Q_raw'],
-            cell_ids=batch['cell_id'], cycle_indices=batch['cycle_idx'],
-            soh_batch=batch['soh']).to(device)
-        optimizer.zero_grad(set_to_none=True)
-        with autocast():
-            xr, sp, vp = model(xm)
-            loss, ld = criterion(xf, xr, soh, sp, vdr, vp, alpha,
-                use_dynamic_gating=use_gating, use_mae=use_mae, use_vdr=use_vdr)
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-        scaler.step(optimizer); scaler.update()
-        total += ld['total']
-        for k in accum: accum[k] += ld[k]
-        nb += 1
-    avg = {k: v/max(nb,1) for k,v in accum.items()}
-    avg['total'] = total/max(nb,1)
-    return avg
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, value):
+        if isinstance(value, np.integer):
+            return int(value)
+        if isinstance(value, np.floating):
+            return float(value)
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        return super().default(value)
 
-@torch.no_grad()
-def evaluate(model, loader, criterion, phys, device, use_mae, use_gating, use_vdr):
-    model.eval()
-    total, accum, nb = 0., {'mae':0,'soh':0,'vdr':0}, 0
-    sp_all, st_all, vp_all, vt_all, mr_all = [],[],[],[],[]
-    for batch in loader:
-        xm = batch['x_masked'].to(device); xf = batch['x_full'].to(device)
-        soh = batch['soh'].to(device); vdr = batch['vdr'].to(device)
-        alpha = phys.batch_extract(batch['V_raw'], batch['Q_raw'],
-            cell_ids=batch['cell_id'], cycle_indices=batch['cycle_idx'],
-            soh_batch=batch['soh'], inference_mode=True).to(device)
-        with autocast():
-            xr, sp, vp = model(xm)
-            loss, ld = criterion(xf, xr, soh, sp, vdr, vp, alpha,
-                use_dynamic_gating=use_gating, use_mae=use_mae, use_vdr=use_vdr)
-        total += ld['total']
-        for k in accum: accum[k] += ld[k]
-        sp_all.append(sp.squeeze().cpu().numpy()); st_all.append(soh.cpu().numpy())
-        vp_all.append(vp.squeeze().cpu().numpy()); vt_all.append(vdr.cpu().numpy())
-        if use_mae and xr is not None:
-            mr_all.append(((xr-xf)**2).mean(dim=(1,2)).sqrt().cpu().numpy())
-        nb += 1
-    sm = compute_task_metrics(np.concatenate(sp_all)-np.concatenate(st_all), np.concatenate(st_all))
-    vm = compute_task_metrics(np.concatenate(vp_all)-np.concatenate(vt_all), np.concatenate(vt_all))
-    mr = float(np.mean(np.concatenate(mr_all))) if mr_all else 0.
-    al = {k: v/max(nb,1) for k,v in accum.items()}
-    return {'loss':total/max(nb,1), 'soh_rmse':sm['rmse'], 'soh_mae':sm['mae'],
-            'soh_mape':sm['mape'], 'soh_r2':sm['r2'], 'vdr_rmse':vm['rmse'],
-            'vdr_mae':vm['mae'], 'vdr_r2':vm['r2'], 'mae_recon_rmse':mr,
-            'loss_mae':al['mae'], 'loss_soh':al['soh'], 'loss_vdr':al['vdr']}
 
-def main():
-    args = get_args()
-    torch.manual_seed(args.seed); np.random.seed(args.seed)
-    if torch.cuda.is_available(): torch.cuda.manual_seed_all(args.seed)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    use_mae = args.ablation not in ('no_mae','single_task')
-    use_gating = (args.ablation == 'none')
-    use_vdr = args.ablation not in ('no_vdr','single_task')
+def save_json(value, path):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, indent=2, cls=NumpyEncoder)
 
-    print("="*70); print("  PG-M2TN Training Pipeline"); print("="*70)
-    print(f"  Device: {device} | Ablation: {args.ablation} | Epochs: {args.epochs}")
 
-    # Data
-    ds = BatteryCycleDataset(args.data_root, args.datasets, args.seq_len, args.min_cycles)
-    tr_i, va_i, te_i = split_by_cell(ds, seed=args.seed)
-    tr_dl = DataLoader(MaskedBatteryDataset(Subset(ds,tr_i)), batch_size=args.batch_size,
-                       shuffle=True, num_workers=args.num_workers, pin_memory=True, drop_last=True)
-    va_dl = DataLoader(MaskedBatteryDataset(Subset(ds,va_i)), batch_size=args.batch_size,
-                       shuffle=False, num_workers=args.num_workers, pin_memory=True)
-    te_dl = DataLoader(MaskedBatteryDataset(Subset(ds,te_i), fixed_mask_ratio=0.5),
-                       batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+def set_seed(seed, deterministic=True):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
 
-    # Model
-    model = PGM2TN(2, args.hidden_dim, args.num_layers, args.dropout, use_mae).to(device)
-    print(f"  Parameters: {count_parameters(model):,}")
-    phys = PhysicsExtractor()
-    crit = PhysicsGatedLoss(lambda_mae=args.lambda_mae)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    sched = WarmupCosineScheduler(opt, args.warmup_epochs, args.epochs, args.lr)
-    scaler = GradScaler()
-    os.makedirs(args.save_dir, exist_ok=True)
-    cn = f"pgm2tn_{args.ablation}"
 
-    # Train
-    best_vl, best_sr, pat, hist = float('inf'), float('inf'), 0, []
-    t0 = time.time()
-    for ep in range(1, args.epochs+1):
-        te = time.time(); sched.step(ep-1)
-        tm = train_one_epoch(model, tr_dl, crit, opt, scaler, phys, device, use_mae, use_gating, use_vdr)
-        vm = evaluate(model, va_dl, crit, phys, device, use_mae, use_gating, use_vdr)
-        el = time.time()-te; ib = vm['loss']<best_vl
-        mk = " *BEST*" if ib else ""
-        if vm['soh_rmse']<best_sr: best_sr=vm['soh_rmse']
-        print(f" {ep:>3d}/{args.epochs:<3d} | TrL:{tm['total']:.4f} | VaL:{vm['loss']:.4f} | "
-              f"SOH:{vm['soh_rmse']:.4f} | VDR:{vm['vdr_rmse']:.4f} | R²:{vm['soh_r2']:.3f} | "
-              f"{el:.1f}s{mk}")
-        hist.append({'epoch':ep,'train_loss':tm['total'],'val_loss':vm['loss'],
-                     'val_soh_rmse':vm['soh_rmse'],'val_soh_r2':vm['soh_r2']})
-        if ib:
-            best_vl=vm['loss']; pat=0
-            torch.save({'epoch':ep,'model_state_dict':model.state_dict(),
-                        'val_loss':best_vl,'args':vars(args)},
-                       os.path.join(args.save_dir, f'{cn}_best.pt'))
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def make_scheduler(optimizer, epochs, warmup_epochs):
+    def multiplier(epoch):
+        if warmup_epochs > 0 and epoch < warmup_epochs:
+            return float(epoch + 1) / float(warmup_epochs)
+        denominator = max(1, epochs - warmup_epochs)
+        progress = float(epoch - warmup_epochs) / float(denominator)
+        return 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, multiplier)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train the August 2026 PG-M2TN configuration"
+    )
+    parser.add_argument("--data_root", default="./dataset")
+    parser.add_argument("--datasets", nargs="+", default=DATASETS)
+    parser.add_argument("--variant", choices=sorted(VARIANTS), default="full")
+    parser.add_argument("--output_dir", default="./outputs")
+    parser.add_argument("--epochs", type=int, default=PROTOCOL["epochs"])
+    parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--per_gpu_batch_size", type=int, default=None)
+    parser.add_argument("--grad_accum_steps", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=PROTOCOL["training_seed"])
+    parser.add_argument("--split_seed", type=int, default=PROTOCOL["split_seed"])
+    parser.add_argument(
+        "--val_mask_seed", type=int, default=PROTOCOL["validation_mask_seed"]
+    )
+    parser.add_argument(
+        "--test_mask_seed", type=int, default=PROTOCOL["test_mask_seed"]
+    )
+    parser.add_argument("--patience", type=int, default=PROTOCOL["early_stopping_patience"])
+    parser.add_argument("--nondeterministic", action="store_true")
+    parser.add_argument("--verbose_epochs", action="store_true")
+    return parser.parse_args()
+
+
+def resolve_batch_protocol(args, configuration):
+    replicas = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    per_gpu_batch = args.per_gpu_batch_size or configuration["per_gpu_batch_size"]
+    global_micro_batch = per_gpu_batch * replicas
+    target = PROTOCOL["target_effective_batch_size"]
+    if args.grad_accum_steps is None:
+        if target % global_micro_batch != 0:
+            raise ValueError(
+                "The target effective batch size 2048 is not divisible by the "
+                f"global micro-batch {global_micro_batch}. Set --grad_accum_steps."
+            )
+        accumulation_steps = target // global_micro_batch
+    else:
+        accumulation_steps = args.grad_accum_steps
+    if accumulation_steps < 1:
+        raise ValueError("--grad_accum_steps must be at least 1")
+    return replicas, per_gpu_batch, global_micro_batch, accumulation_steps
+
+
+def build_loaders(args, global_micro_batch):
+    dataset = BatteryCycleDataset(
+        data_root=args.data_root,
+        datasets=args.datasets,
+        seq_len=PROTOCOL["sequence_length"],
+        min_cycles=PROTOCOL["minimum_cycles"],
+    )
+    train_indices, val_indices, test_indices, split_cells = split_by_cell(
+        dataset, seed=args.split_seed, return_cell_ids=True
+    )
+    train_dataset = MaskedBatteryDataset(
+        Subset(dataset, train_indices),
+        min_ratio=PROTOCOL["training_mask_range"][0],
+        max_ratio=PROTOCOL["training_mask_range"][1],
+    )
+    val_dataset = MaskedBatteryDataset(
+        Subset(dataset, val_indices),
+        fixed_mask_ratio=PROTOCOL["evaluation_mask_ratio"],
+        seed=args.val_mask_seed,
+    )
+    test_dataset = MaskedBatteryDataset(
+        Subset(dataset, test_indices),
+        fixed_mask_ratio=PROTOCOL["evaluation_mask_ratio"],
+        seed=args.test_mask_seed,
+    )
+
+    generator = torch.Generator()
+    generator.manual_seed(args.seed)
+    common = {
+        "batch_size": global_micro_batch,
+        "num_workers": args.num_workers,
+        "pin_memory": torch.cuda.is_available(),
+        "worker_init_fn": seed_worker,
+    }
+    loaders = (
+        DataLoader(train_dataset, shuffle=True, generator=generator, **common),
+        DataLoader(val_dataset, shuffle=False, **common),
+        DataLoader(test_dataset, shuffle=False, **common),
+    )
+    manifest = {
+        "data_root": os.path.abspath(args.data_root),
+        "datasets": args.datasets,
+        "profile_mode": PROTOCOL["profile_mode"],
+        "split_strategy": "dataset-stratified cell-level 70/15/15",
+        "split_seed": args.split_seed,
+        "train_samples": len(train_indices),
+        "validation_samples": len(val_indices),
+        "test_samples": len(test_indices),
+        "train_cells": len(split_cells["train"]),
+        "validation_cells": len(split_cells["val"]),
+        "test_cells": len(split_cells["test"]),
+        "split_cells": split_cells,
+    }
+    return loaders, manifest
+
+
+def build_model(configuration, device):
+    return PGM2TN(
+        input_dim=2,
+        hidden_dim=configuration["hidden_dim"],
+        num_layers=configuration["num_layers"],
+        dropout=configuration["dropout"],
+        enable_mae=configuration["enable_mae"],
+    ).to(device)
+
+
+def train(args):
+    configuration = variant_config(args.variant)
+    set_seed(args.seed, deterministic=not args.nondeterministic)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    replicas, per_gpu_batch, global_micro_batch, accumulation_steps = (
+        resolve_batch_protocol(args, configuration)
+    )
+    effective_batch = global_micro_batch * accumulation_steps
+    variant_dir = os.path.join(args.output_dir, args.variant)
+    checkpoint_path = os.path.join(variant_dir, "best.pt")
+    result_path = os.path.join(variant_dir, "results.json")
+    os.makedirs(variant_dir, exist_ok=True)
+
+    print("=" * 80)
+    print(f"PG-M2TN August 2026 protocol: {args.variant}")
+    print(f"Device={device}, replicas={replicas}, output={variant_dir}")
+    print(
+        f"Batch={replicas} x {per_gpu_batch} x {accumulation_steps} "
+        f"accumulation = {effective_batch}"
+    )
+    print("Loading charge-only profiles...", flush=True)
+    (train_loader, val_loader, test_loader), split_manifest = build_loaders(
+        args, global_micro_batch
+    )
+    split_manifest.update(
+        {
+            "training_seed": args.seed,
+            "validation_mask_seed": args.val_mask_seed,
+            "test_mask_seed": args.test_mask_seed,
+            "evaluation_mask_ratio": PROTOCOL["evaluation_mask_ratio"],
+            "per_gpu_batch_size": per_gpu_batch,
+            "replicas": replicas,
+            "gradient_accumulation_steps": accumulation_steps,
+            "effective_optimizer_batch": effective_batch,
+        }
+    )
+    save_json(split_manifest, os.path.join(variant_dir, "split_manifest.json"))
+
+    raw_model = build_model(configuration, device)
+    if configuration["task_only_cudnn_anchor"]:
+        for parameter in raw_model.mae_decoder.parameters():
+            parameter.requires_grad = False
+    model = nn.DataParallel(raw_model) if replicas > 1 else raw_model
+    criterion = FixedWeightedLoss(
+        soh_weight=configuration["soh_weight"],
+        vdr_weight=configuration["vdr_weight"],
+        lambda_mae=configuration["lambda_mae"],
+        reconstruction_scope="masked",
+    )
+    trainable_parameters = [
+        parameter for parameter in model.parameters() if parameter.requires_grad
+    ]
+    optimizer = torch.optim.AdamW(
+        trainable_parameters,
+        lr=configuration["learning_rate"],
+        weight_decay=configuration["weight_decay"],
+    )
+    scheduler = make_scheduler(
+        optimizer, args.epochs, PROTOCOL["warmup_epochs"]
+    )
+
+    best_val_rmse = float("inf")
+    best_epoch = 0
+    epochs_without_improvement = 0
+    history = []
+    start_time = time.time()
+    optimizer.zero_grad(set_to_none=True)
+
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        running = defaultdict(float)
+        batch_count = 0
+        micro_batches = len(train_loader)
+
+        for batch_index, batch in enumerate(train_loader):
+            inputs = batch["x_masked"].to(device, non_blocking=True)
+            reconstruction, soh_prediction, vdr_prediction = model(inputs)
+            loss, parts = criterion(
+                batch, reconstruction, soh_prediction, vdr_prediction
+            )
+            if not torch.isfinite(loss):
+                raise RuntimeError("Training produced a non-finite loss")
+
+            group_offset = batch_index % accumulation_steps
+            if group_offset == 0:
+                group_size = min(accumulation_steps, micro_batches - batch_index)
+            scaled_loss = loss / group_size
+
+            if configuration["task_only_cudnn_anchor"]:
+                anchor = (
+                    configuration["backward_anchor_weight"]
+                    * criterion.reconstruction_loss(batch, reconstruction, device)
+                    / group_size
+                )
+                anchor_gradients = torch.autograd.grad(
+                    anchor,
+                    trainable_parameters,
+                    retain_graph=True,
+                    allow_unused=True,
+                )
+                (scaled_loss + anchor).backward()
+                for parameter, anchor_gradient in zip(
+                    trainable_parameters, anchor_gradients
+                ):
+                    if anchor_gradient is not None:
+                        parameter.grad.sub_(anchor_gradient)
+            else:
+                scaled_loss.backward()
+
+            update_now = (
+                group_offset + 1 == group_size
+                or batch_index + 1 == micro_batches
+            )
+            if update_now:
+                nn.utils.clip_grad_norm_(
+                    trainable_parameters, PROTOCOL["gradient_clip"]
+                )
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+
+            for name, value in parts.items():
+                running[name] += value
+            batch_count += 1
+
+        scheduler.step()
+        val_metrics = evaluate_soh(model, val_loader, device)
+        average_training = {
+            name: value / max(batch_count, 1) for name, value in running.items()
+        }
+        improved = val_metrics["rmse"] < best_val_rmse
+        if improved:
+            best_val_rmse = val_metrics["rmse"]
+            best_epoch = epoch
+            epochs_without_improvement = 0
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": raw_model.state_dict(),
+                    "best_val_rmse": best_val_rmse,
+                    "hp": {"variant": args.variant, **configuration},
+                    "args": vars(args),
+                    "protocol": PROTOCOL,
+                },
+                checkpoint_path,
+            )
         else:
-            pat+=1
-            if pat>=args.patience: print(f"  >> Early stopping at epoch {ep}"); break
-    tt = time.time()-t0
+            epochs_without_improvement += 1
 
-    # Test
-    ckpt = torch.load(os.path.join(args.save_dir, f'{cn}_best.pt'), map_location=device)
-    model.load_state_dict(ckpt['model_state_dict'])
-    tm = evaluate(model, te_dl, crit, phys, device, use_mae, use_gating, use_vdr)
-    print(f"\n{'='*70}\n  TEST: SOH RMSE={tm['soh_rmse']:.4f} MAE={tm['soh_mae']:.4f} "
-          f"R²={tm['soh_r2']:.4f} | VDR RMSE={tm['vdr_rmse']:.4f}\n{'='*70}")
-    res = {'ablation':args.ablation, **{f'test_{k}':v for k,v in tm.items()},
-           'params':count_parameters(model), 'time_s':tt, 'history':hist, 'args':vars(args)}
-    rp = os.path.join(args.save_dir, f'{cn}_results.json')
-    with open(rp,'w') as f: json.dump(res, f, indent=2)
-    print(f"  Saved: {rp}")
+        history.append(
+            {
+                "epoch": epoch,
+                "train": average_training,
+                "validation": val_metrics,
+                "learning_rate": optimizer.param_groups[0]["lr"],
+            }
+        )
+        if args.verbose_epochs or epoch == 1 or epoch % 10 == 0 or improved:
+            marker = " *BEST*" if improved else ""
+            print(
+                f"Epoch {epoch:3d}/{args.epochs}: "
+                f"train={average_training['total']:.6f}, "
+                f"val_rmse={val_metrics['rmse']:.6f}, "
+                f"val_mae={val_metrics['mae']:.6f}{marker}",
+                flush=True,
+            )
+        if epochs_without_improvement >= args.patience:
+            print(f"Early stopping at epoch {epoch}", flush=True)
+            break
 
-if __name__ == '__main__':
-    main()
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    raw_model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    evaluation_model = model
+    validation_metrics, validation_per_dataset = evaluate_tasks(
+        evaluation_model, val_loader, device, enable_mae=configuration["enable_mae"]
+    )
+    test_metrics, test_per_dataset = evaluate_tasks(
+        evaluation_model, test_loader, device, enable_mae=configuration["enable_mae"]
+    )
+    if configuration["vdr_weight"] == 0.0:
+        validation_metrics["diagnostic_unsupervised_vdr"] = validation_metrics.pop("vdr")
+        test_metrics["diagnostic_unsupervised_vdr"] = test_metrics.pop("vdr")
+        for values in validation_per_dataset.values():
+            values["diagnostic_unsupervised_vdr"] = values.pop("vdr")
+        for values in test_per_dataset.values():
+            values["diagnostic_unsupervised_vdr"] = values.pop("vdr")
+
+    result = {
+        "variant": args.variant,
+        "configuration": configuration,
+        "protocol": split_manifest,
+        "selection_metric": "validation_soh_rmse",
+        "best_epoch": best_epoch,
+        "best_val_rmse": best_val_rmse,
+        "validation_metrics": validation_metrics,
+        "validation_per_dataset": validation_per_dataset,
+        "test_metrics": test_metrics,
+        "test_per_dataset": test_per_dataset,
+        "parameters": sum(parameter.numel() for parameter in raw_model.parameters()),
+        "trainable_parameters": count_parameters(raw_model),
+        "checkpoint": checkpoint_path,
+        "elapsed_seconds": time.time() - start_time,
+        "history": history,
+    }
+    save_json(result, result_path)
+    print("=" * 80)
+    print(
+        f"Complete: best epoch={best_epoch}, val SOH RMSE={best_val_rmse:.6f}, "
+        f"test SOH RMSE={test_metrics['soh']['rmse']:.6f}"
+    )
+    print(f"Checkpoint: {checkpoint_path}")
+    print(f"Results: {result_path}")
+    return result
+
+
+if __name__ == "__main__":
+    train(parse_args())
