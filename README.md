@@ -1,6 +1,6 @@
 # PG-M2TN
 
-![PG-M2TN framework](assets/figure1.png)
+![PG-M2TN framework](https://raw.githubusercontent.com/shuhaochen618-svg/PG-M2TN/main/assets/figure1.png)
 
 Official implementation of **Physics-Guided Masked Multi-Task Network for Edge-Friendly Battery Health Diagnostics from Stochastically Fragmented Charging Profiles**.
 
