@@ -1,5 +1,5 @@
 """
-PG-M2TN Data Engine - Module 2: Masking Engine
+FA-M2TN Data Engine - Module 2: Masking Engine
 ================================================
 Simulates extreme non-stationary conditions (NC) by applying continuous
 random masking to battery cycle sequences.

@@ -1,4 +1,4 @@
-"""Metrics used by PG-M2TN validation and held-out test evaluation."""
+"""Metrics used by FA-M2TN validation and held-out test evaluation."""
 
 from collections import defaultdict
 

@@ -6,14 +6,14 @@ from setuptools import find_packages, setup
 ROOT = Path(__file__).parent
 
 setup(
-    name="pg-m2tn",
-    version="2.0.0",
-    description="PG-M2TN August 2026 revision reproduction code",
+    name="fa-m2tn",
+    version="2.1.0",
+    description="FA-M2TN training, evaluation, and ablation code",
     long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
     author="Shuhao Chen",
     author_email="2023333541008@mails.zstu.edu.cn",
-    url="https://github.com/shuhaochen618-svg/PG-M2TN",
+    url="https://github.com/shuhaochen618-svg/FA-M2TN",
     packages=find_packages(),
     python_requires=">=3.11,<3.12",
     install_requires=[

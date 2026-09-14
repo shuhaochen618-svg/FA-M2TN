@@ -1,4 +1,4 @@
-"""Train PG-M2TN or one exact August 2026 ablation variant."""
+"""Train FA-M2TN or one exact component-ablation variant."""
 
 import argparse
 import json
@@ -17,12 +17,12 @@ from torch.utils.data import DataLoader, Subset
 REPOSITORY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPOSITORY_ROOT)
 
-from pg_m2tn.data.dataset_loader import BatteryCycleDataset, split_by_cell
-from pg_m2tn.data.masking_engine import MaskedBatteryDataset
-from pg_m2tn.evaluation import evaluate_soh, evaluate_tasks
-from pg_m2tn.models.loss import FixedWeightedLoss
-from pg_m2tn.models.pg_m2tn import PGM2TN, count_parameters
-from pg_m2tn.protocol import DATASETS, PROTOCOL, VARIANTS, variant_config
+from fa_m2tn.data.dataset_loader import BatteryCycleDataset, split_by_cell
+from fa_m2tn.data.masking_engine import MaskedBatteryDataset
+from fa_m2tn.evaluation import evaluate_soh, evaluate_tasks
+from fa_m2tn.models.fa_m2tn import FAM2TN, count_parameters
+from fa_m2tn.models.loss import FixedWeightedLoss
+from fa_m2tn.protocol import DATASETS, PROTOCOL, VARIANTS, variant_config
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -72,7 +72,7 @@ def make_scheduler(optimizer, epochs, warmup_epochs):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Train the August 2026 PG-M2TN configuration"
+        description="Train the FA-M2TN reference configuration"
     )
     parser.add_argument("--data_root", default="./dataset")
     parser.add_argument("--datasets", nargs="+", default=DATASETS)
@@ -172,7 +172,7 @@ def build_loaders(args, global_micro_batch):
 
 
 def build_model(configuration, device):
-    return PGM2TN(
+    return FAM2TN(
         input_dim=2,
         hidden_dim=configuration["hidden_dim"],
         num_layers=configuration["num_layers"],
@@ -195,7 +195,7 @@ def train(args):
     os.makedirs(variant_dir, exist_ok=True)
 
     print("=" * 80)
-    print(f"PG-M2TN August 2026 protocol: {args.variant}")
+    print(f"FA-M2TN protocol: {args.variant}")
     print(f"Device={device}, replicas={replicas}, output={variant_dir}")
     print(
         f"Batch={replicas} x {per_gpu_batch} x {accumulation_steps} "

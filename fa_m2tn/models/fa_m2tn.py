@@ -1,5 +1,5 @@
 """
-PG-M2TN core network.
+FA-M2TN core network.
 =====================
 Architecture:
   1. Shared Encoder  : BiLSTM backbone (lightweight, edge-friendly)
@@ -16,12 +16,12 @@ import torch
 import torch.nn as nn
 
 
-class PGM2TN(nn.Module):
+class FAM2TN(nn.Module):
     """
-    Physics-guided masked multi-task network (PG-M2TN).
+    Fragmentation-aware masked multi-task network (FA-M2TN).
 
     The architecture itself receives only normalized voltage and current. The
-    August 2026 training protocol uses VDR as a fixed-weight auxiliary target;
+    The reference training protocol uses VDR as a fixed-weight auxiliary target;
     IC/alpha features are not model inputs and do not route gradients.
     """
 
@@ -172,7 +172,7 @@ def count_parameters(model):
 
 
 if __name__ == '__main__':
-    model = PGM2TN(input_dim=2, hidden_dim=128, num_layers=2)
+    model = FAM2TN(input_dim=2, hidden_dim=128, num_layers=2)
     x = torch.randn(4, 512, 2)
     x_recon, soh, vdr = model(x)
 

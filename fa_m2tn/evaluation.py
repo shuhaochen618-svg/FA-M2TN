@@ -5,7 +5,7 @@ from collections import defaultdict
 import numpy as np
 import torch
 
-from pg_m2tn.utils.metrics import compute_metrics
+from fa_m2tn.utils.metrics import compute_metrics
 
 
 @torch.no_grad()

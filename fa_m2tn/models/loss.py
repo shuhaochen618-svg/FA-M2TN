@@ -1,4 +1,4 @@
-"""Fixed-weight objective used by the August 2026 PG-M2TN revision."""
+"""Fixed-weight objective used by the FA-M2TN reference configuration."""
 
 import torch
 import torch.nn as nn

@@ -1,4 +1,4 @@
-"""Machine-readable constants for the August 2026 revision protocol."""
+"""Machine-readable constants for the FA-M2TN reference protocol."""
 
 DATASETS = ["CALCE", "HUST", "HNEI", "CALB", "ISU_ILCC"]
 

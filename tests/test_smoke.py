@@ -2,10 +2,10 @@ import unittest
 
 import torch
 
-from pg_m2tn.data.masking_engine import MaskedBatteryDataset
-from pg_m2tn.models.loss import FixedWeightedLoss
-from pg_m2tn.models.pg_m2tn import PGM2TN, count_parameters
-from pg_m2tn.protocol import VARIANTS
+from fa_m2tn.data.masking_engine import MaskedBatteryDataset
+from fa_m2tn.models.fa_m2tn import FAM2TN, count_parameters
+from fa_m2tn.models.loss import FixedWeightedLoss
+from fa_m2tn.protocol import VARIANTS
 
 
 class SingleSampleDataset:
@@ -24,9 +24,9 @@ class SingleSampleDataset:
         }
 
 
-class PGM2TNSmokeTest(unittest.TestCase):
+class FAM2TNSmokeTest(unittest.TestCase):
     def test_model_shapes_and_parameter_count(self):
-        model = PGM2TN(hidden_dim=128, num_layers=2)
+        model = FAM2TN(hidden_dim=128, num_layers=2)
         reconstruction, soh, vdr = model(torch.randn(2, 512, 2))
         self.assertEqual(tuple(reconstruction.shape), (2, 512, 2))
         self.assertEqual(tuple(soh.shape), (2, 1))

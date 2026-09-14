@@ -1,4 +1,4 @@
-"""Evaluate a PG-M2TN checkpoint on the fixed August 2026 test split."""
+"""Evaluate an FA-M2TN checkpoint on the fixed held-out test split."""
 
 import argparse
 import json
@@ -12,15 +12,15 @@ from torch.utils.data import DataLoader, Subset
 REPOSITORY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPOSITORY_ROOT)
 
-from pg_m2tn.data.dataset_loader import BatteryCycleDataset, split_by_cell
-from pg_m2tn.data.masking_engine import MaskedBatteryDataset
-from pg_m2tn.evaluation import evaluate_tasks
-from pg_m2tn.models.pg_m2tn import PGM2TN
-from pg_m2tn.protocol import DATASETS, PROTOCOL
+from fa_m2tn.data.dataset_loader import BatteryCycleDataset, split_by_cell
+from fa_m2tn.data.masking_engine import MaskedBatteryDataset
+from fa_m2tn.evaluation import evaluate_tasks
+from fa_m2tn.models.fa_m2tn import FAM2TN
+from fa_m2tn.protocol import DATASETS, PROTOCOL
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate PG-M2TN")
+    parser = argparse.ArgumentParser(description="Evaluate FA-M2TN")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--data_root", default="./dataset")
     parser.add_argument("--datasets", nargs="+", default=DATASETS)
@@ -40,7 +40,7 @@ def main():
     checkpoint = torch.load(args.checkpoint, map_location=device)
     configuration = checkpoint["hp"]
     variant = configuration.get("variant", "full")
-    model = PGM2TN(
+    model = FAM2TN(
         input_dim=2,
         hidden_dim=int(configuration["hidden_dim"]),
         num_layers=int(configuration["num_layers"]),

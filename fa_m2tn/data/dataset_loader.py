@@ -1,4 +1,4 @@
-"""Charge-only battery dataset used by the August 2026 PG-M2TN runs."""
+"""Charge-only battery dataset used by the FA-M2TN experiments."""
 
 import glob
 import os
